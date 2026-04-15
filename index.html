@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NovaTerm APT Repository</title>
+<style>
+  :root { --bg: #1d2021; --fg: #ebdbb2; --accent: #fe8019; --muted: #928374; --card: #282828; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'SF Mono', 'JetBrains Mono', monospace; background: var(--bg); color: var(--fg); max-width: 720px; margin: 0 auto; padding: 2rem; line-height: 1.6; }
+  h1 { color: var(--accent); font-size: 1.5rem; margin-bottom: 0.5rem; }
+  h2 { color: var(--fg); font-size: 1.1rem; margin: 1.5rem 0 0.5rem; }
+  code { background: var(--card); padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.85rem; }
+  pre { background: var(--card); padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; line-height: 1.5; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .muted { color: var(--muted); }
+  .badge { display: inline-block; background: var(--accent); color: var(--bg); padding: 0.15rem 0.5rem; border-radius: 3px; font-size: 0.75rem; font-weight: 600; }
+  hr { border: none; border-top: 1px solid var(--card); margin: 1.5rem 0; }
+</style>
+</head>
+<body>
+  <h1>NovaTerm APT Repository</h1>
+  <p class="muted">aarch64 packages for the NovaTerm terminal emulator</p>
+  <hr>
+
+  <h2>Quick Setup</h2>
+  <p>Add the repository to NovaTerm or Termux:</p>
+  <pre><code># 1. Add the repository
+echo "deb https://novaterm-org.github.io/novaterm-apt-repo stable main" \
+  &gt;&gt; $PREFIX/etc/apt/sources.list.d/novaterm.list
+
+# 2. Import the GPG key
+curl -fsSL https://novaterm-org.github.io/novaterm-apt-repo/pubkey.gpg \
+  | apt-key add -
+
+# 3. Update package lists
+apt update</code></pre>
+
+  <h2>Alternative (unsigned, development only)</h2>
+  <pre><code>echo "deb [trusted=yes] https://novaterm-org.github.io/novaterm-apt-repo stable main" \
+  &gt;&gt; $PREFIX/etc/apt/sources.list.d/novaterm.list
+apt update</code></pre>
+
+  <h2>Repository Structure</h2>
+  <ul>
+    <li><code>dists/stable/main/binary-aarch64/</code> — arm64 packages</li>
+    <li><code>dists/stable/main/binary-all/</code> — architecture-independent packages</li>
+    <li><code>pool/main/</code> — package pool</li>
+    <li><code>pubkey.gpg</code> — GPG signing key</li>
+  </ul>
+
+  <h2>GPG Key</h2>
+  <p>Fingerprint: <code>BE72 8511 1B30 9E24 3AD7 6EF1 A38F 7EED EAA6 8D03</code></p>
+
+  <hr>
+  <p class="muted" style="text-align: center;">NovaTerm &mdash; Next-generation Android terminal</p>
+</body>
+</html>

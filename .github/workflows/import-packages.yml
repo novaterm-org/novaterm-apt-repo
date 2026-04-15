@@ -46,7 +46,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  DISTRIBUTION: novaterm
+  DISTRIBUTION: stable
   COMPONENT: main
   GPG_KEY_ID: ''
 

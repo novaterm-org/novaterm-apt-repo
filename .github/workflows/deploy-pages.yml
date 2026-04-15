@@ -67,6 +67,7 @@ jobs:
             # Use pre-existing dists/ directory
             mkdir -p output
             cp -r dists output/ 2>/dev/null || true
+            cp -r pool output/ 2>/dev/null || true
           else
             echo "::warning::No packages or dists found. Creating empty repository."
             mkdir -p output/dists/novaterm/main/binary-aarch64
