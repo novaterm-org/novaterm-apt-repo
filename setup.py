@@ -6,15 +6,15 @@ def readme():
     with open('README.rst') as f:
         return f.read()
 setup(
-    name = 'termux-apt-repo',
+    name = 'novaterm-apt-repo',
     version = '0.5',
     license='Apache License 2.0',
-    description = 'Script to create Termux apt repositories',
+    description = 'Script to create NovaTerm apt repositories',
     long_description = readme(),
     author = 'Fredrik Fornwall',
     author_email = 'fredrik@fornwall.net',
-    url = 'https://github.com/termux/termux-apt-repo',
-    scripts = ['termux-apt-repo'],
+    url = 'https://github.com/novaterm/novaterm-apt-repo',
+    scripts = ['novaterm-apt-repo'],
     classifiers = (
         'Intended Audience :: Developers',
         'Topic :: Software Development :: Build Tools',

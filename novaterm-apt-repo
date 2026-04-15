@@ -106,7 +106,7 @@ parser.add_argument('input', metavar='input', type=str,
                     help='folder where .deb files are located')
 parser.add_argument('output', metavar='output', type=str,
                     help='folder with repository tree')
-parser.add_argument('distribution', metavar='dist', type=str, nargs='?', default='termux',
+parser.add_argument('distribution', metavar='dist', type=str, nargs='?', default='novaterm',
                     help='name of distribution folder. deb files are put into output/dists/distribution/component/binary-$ARCH/')
 parser.add_argument('component', metavar='comp', type=str, nargs='?', default='extras',
                     help='name of component folder. deb files are put into output/dists/distribution/component/binary-$ARCH/')
@@ -147,7 +147,7 @@ else:
 # See https://wiki.debian.org/RepositoryFormat#A.22Release.22_files for format:
 release_file_path = distribution_path + '/Release'
 release_file = open(release_file_path, 'w')
-print("Codename: termux", file=release_file)
+print("Codename: novaterm", file=release_file)
 print("Version: 1", file=release_file)
 print("Architectures: " + ' '.join(encountered_arches), file=release_file)
 print("Description: " + DISTRIBUTION + " repository", file=release_file)

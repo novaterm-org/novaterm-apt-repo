@@ -1,22 +1,22 @@
-termux-apt-repo
+novaterm-apt-repo
 ---------------
 
-Script to create `Termux <https://termux.com>`__ package repos.
+Script to create `NovaTerm <https://novaterm.com>`__ package repos.
 
 It can be used to publish cross-compiled packages created using the
-`Termux build setup <https://github.com/termux/termux-packages>`__ or
+`NovaTerm build setup <https://github.com/novaterm/novaterm-packages>`__ or
 with packages created (possibly on-device) with
-`termux-create-package <https://github.com/termux/termux-create-package>`__.
+`novaterm-create-package <https://github.com/novaterm/novaterm-create-package>`__.
 
 Usage instructions
 ------------------
 
-In Termux, install with ``pkg install termux-apt-repo`` and execute
+In NovaTerm, install with ``pkg install novaterm-apt-repo`` and execute
 as:
 
 ::
 
-    termux-apt-repo [-h] [--use-hard-links] input output [dist] [comp]
+    novaterm-apt-repo [-h] [--use-hard-links] input output [dist] [comp]
     
     positional arguments:
     input             folder where .deb files are located
@@ -32,8 +32,8 @@ as:
                       on an android device
     -s --sign         sign repo with GPG key
 
-When using outside Termux (the script should work on most Linux
-distributions), install with ``pip3 install termux-apt-repo``.
+When using outside NovaTerm (the script should work on most Linux
+distributions), install with ``pip3 install novaterm-apt-repo``.
 
 All the .deb files in the first directory will be published to a newly
 created APT repository in the second directory (which will be deleted if
@@ -45,7 +45,7 @@ Publishing the generated folder
 The published folder can be made available at a publicly accessible
 ``$REPO_URL`` using any method:
 
-1. By running termux-apt-repository on a web server directly.
+1. By running novaterm-apt-repository on a web server directly.
 2. Using rsync:
    ``rsync --delete -r <apt-repository-directory> your.host:path/to/folder``.
 3. Creating a zip or tar file and unpacking it at a web server.
