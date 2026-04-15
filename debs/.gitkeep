@@ -1,0 +1,2 @@
+# This directory holds .deb packages before they are organized into pool/
+# Add .deb files here and push to trigger repository metadata regeneration.

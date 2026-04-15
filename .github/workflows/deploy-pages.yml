@@ -6,11 +6,21 @@ name: Deploy APT Repository
 
 on:
   workflow_dispatch:
+    inputs:
+      sign_repo:
+        description: 'Sign repository with GPG'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
   push:
     branches: [main]
     paths:
       - 'debs/**'
       - 'dists/**'
+      - 'pool/**'
 
 permissions:
   contents: read
@@ -28,6 +38,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
@@ -35,24 +47,106 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y dpkg-dev apt-utils python3
+          sudo apt-get install -y dpkg-dev apt-utils python3 gnupg
+
+      - name: Import GPG key (if signing)
+        if: github.event.inputs.sign_repo == 'true' || (github.event_name == 'push' && secrets.GPG_PRIVATE_KEY != '')
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          if [ -n "$GPG_PRIVATE_KEY" ]; then
+            echo "$GPG_PRIVATE_KEY" | gpg --import --batch --no-tty
+            GPG_KEY_ID=$(gpg --list-keys --with-colons | grep '^fpr' | head -1 | cut -d: -f10)
+            echo "GPG_KEY_ID=$GPG_KEY_ID" >> "$GITHUB_ENV"
+            echo "GPG signing key imported: $GPG_KEY_ID"
+          else
+            echo "No GPG key available, skipping signing"
+          fi
+
+      - name: Organize packages into pool
+        run: |
+          # Move .deb files from debs/ into pool/ organized by package name
+          mkdir -p pool/main
+
+          if [ -d "debs" ]; then
+            for deb in debs/*.deb debs/*/*.deb; do
+              [ -f "$deb" ] || continue
+
+              # Extract package name from .deb file
+              pkg_name=$(dpkg-deb -f "$deb" Package 2>/dev/null || echo "")
+              if [ -z "$pkg_name" ]; then
+                # Fallback: extract from filename
+                pkg_name=$(basename "$deb" | sed 's/_.*//')
+              fi
+
+              # Create pool directory: pool/main/<first-letter>/<package>/
+              first_letter=$(echo "$pkg_name" | cut -c1)
+              pkg_dir="pool/main/${first_letter}/${pkg_name}"
+              mkdir -p "$pkg_dir"
+
+              # Copy to pool (don't move, keep original for reference)
+              cp "$deb" "$pkg_dir/"
+              echo "Organized: $(basename "$deb") → $pkg_dir/"
+            done
+          fi
 
       - name: Generate APT repository metadata
         run: |
-          # If debs/ directory exists with .deb files, generate repo structure
-          if [ -d "debs" ] && [ "$(ls -A debs/*.deb 2>/dev/null)" ]; then
-            python3 novaterm-apt-repo debs/ output/ novaterm main --sign || \
+          SIGN_FLAG=""
+          if [ -n "$GPG_KEY_ID" ]; then
+            SIGN_FLAG="--sign"
+          fi
+
+          # Generate from pool directory for proper structure
+          if [ -d "pool" ] && find pool -name "*.deb" | head -1 | grep -q .; then
+            echo "Generating APT repository from pool directory..."
+            python3 novaterm-apt-repo pool/ output/ novaterm main $SIGN_FLAG || \
+            python3 novaterm-apt-repo pool/ output/ novaterm main
+          # Fallback: generate from debs/ directory
+          elif [ -d "debs" ] && [ "$(ls -A debs/*.deb 2>/dev/null)" ]; then
+            echo "Generating APT repository from debs directory..."
+            python3 novaterm-apt-repo debs/ output/ novaterm main $SIGN_FLAG || \
             python3 novaterm-apt-repo debs/ output/ novaterm main
           fi
 
-          # If dists/ already exists (pre-built), use it directly
+          # If dists/ already exists (pre-built), merge it
           if [ -d "dists" ]; then
             mkdir -p output
-            cp -r dists output/ 2>/dev/null || true
+            cp -rn dists output/ 2>/dev/null || true
           fi
 
           # Ensure we have output directory
           mkdir -p output
+
+          # Generate pubkey.gpg for client import
+          if [ -n "$GPG_KEY_ID" ]; then
+            gpg --export --armor "$GPG_KEY_ID" > output/pubkey.gpg
+            echo "GPG public key exported to output/pubkey.gpg"
+          else
+            # Create a placeholder pubkey if no signing key
+            if [ ! -f "pubkey.gpg" ]; then
+              echo "# NovaTerm APT Repository GPG Key" > output/pubkey.gpg
+              echo "# Import with: curl -fsSL \$URL/pubkey.gpg | apt-key add -" >> output/pubkey.gpg
+              echo "# Or use [trusted=yes] in sources.list for unsigned repos" >> output/pubkey.gpg
+            else
+              cp pubkey.gpg output/pubkey.gpg
+            fi
+          fi
+
+      - name: Verify repository structure
+        run: |
+          echo "=== Repository Structure ==="
+          find output/ -type f | head -50
+          echo ""
+          echo "=== Packages file sample ==="
+          find output/ -name "Packages" -exec head -20 {} \; 2>/dev/null || echo "No Packages file found"
+          echo ""
+          echo "=== Release file ==="
+          find output/ -name "Release" -exec cat {} \; 2>/dev/null || echo "No Release file found"
+          echo ""
+          echo "=== InRelease (signed) ==="
+          find output/ -name "InRelease" -exec echo "Found signed InRelease" \; 2>/dev/null || echo "No InRelease found (unsigned repo)"
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
