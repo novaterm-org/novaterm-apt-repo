@@ -1,0 +1,72 @@
+name: Deploy APT Repository
+
+# Deploys the APT repository to GitHub Pages.
+# Triggered when .deb packages are pushed to the repo's debs/ directory,
+# or manually via workflow_dispatch.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'debs/**'
+      - 'dists/**'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build APT repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev apt-utils python3
+
+      - name: Generate APT repository metadata
+        run: |
+          # If debs/ directory exists with .deb files, generate repo structure
+          if [ -d "debs" ] && [ "$(ls -A debs/*.deb 2>/dev/null)" ]; then
+            python3 novaterm-apt-repo debs/ output/ novaterm main --sign || \
+            python3 novaterm-apt-repo debs/ output/ novaterm main
+          fi
+
+          # If dists/ already exists (pre-built), use it directly
+          if [ -d "dists" ]; then
+            mkdir -p output
+            cp -r dists output/ 2>/dev/null || true
+          fi
+
+          # Ensure we have output directory
+          mkdir -p output
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: output
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
