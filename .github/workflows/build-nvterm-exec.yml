@@ -1,0 +1,202 @@
+name: Build nvterm-exec Package
+
+# Downloads termux-exec from the official Termux APT repository,
+# rebrands it as nvterm-exec for NovaTerm (com.termux → com.nvterm),
+# and creates a .deb package for our own APT repository.
+#
+# This approach is consistent with how BootstrapInstaller patches
+# com.termux → com.nvterm at runtime. Since com.termux and com.nvterm
+# are the same byte length (10 bytes), binary replacement is safe.
+#
+# When we have the full CI/CD pipeline for novaterm-packages, we can
+# build nvterm-exec from source with proper Makefile overrides.
+
+on:
+  workflow_dispatch:
+    inputs:
+      termux_exec_version:
+        description: 'termux-exec version to rebrand (e.g., 2.4.0)'
+        required: false
+        default: 'latest'
+  push:
+    paths:
+      - 'termux-exec-package/**'
+
+permissions:
+  contents: write
+
+jobs:
+  build-nvterm-exec:
+    name: Build nvterm-exec .deb
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq dpkg-dev dpkg-sig curl xz-utils
+
+      - name: Download termux-exec .deb
+        id: download
+        run: |
+          # Download Packages index from Termux APT repository
+          curl -fsSL -o Packages.xz "https://packages-cf.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages.xz"
+          xz -d Packages.xz
+
+          # Find the latest termux-exec package entry
+          PKG_ENTRY=$(sed -n '/^Package: termux-exec$/,/^$/p' Packages)
+          if [ -z "$PKG_ENTRY" ]; then
+            echo "::error::termux-exec not found in Termux repository"
+            exit 1
+          fi
+
+          # Extract version and filename
+          VERSION=$(echo "$PKG_ENTRY" | grep '^Version:' | awk '{print $2}')
+          FILENAME=$(echo "$PKG_ENTRY" | grep '^Filename:' | awk '{print $2}')
+          SIZE=$(echo "$PKG_ENTRY" | grep '^Size:' | awk '{print $2}')
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "filename=$FILENAME" >> "$GITHUB_OUTPUT"
+          echo "Found termux-exec version: $VERSION"
+
+          # Download the .deb
+          curl -fsSL -o termux-exec.deb "https://packages-cf.termux.dev/apt/termux-main/$FILENAME"
+
+          # Verify download
+          ACTUAL_SIZE=$(stat -c%s termux-exec.deb)
+          if [ "$ACTUAL_SIZE" != "$SIZE" ]; then
+            echo "::error::Download size mismatch: expected $SIZE, got $ACTUAL_SIZE"
+            exit 1
+          fi
+
+      - name: Rebrand termux-exec → nvterm-exec
+        id: rebrand
+        run: |
+          mkdir -p rebrand
+          cp termux-exec.deb rebrand/original.deb
+          cd rebrand
+
+          # Extract the .deb
+          dpkg-deb -R original.deb extracted/
+
+          # Rebrand: replace com.termux → com.nvterm in control file and scripts
+          # com.termux and com.nvterm are both 10 bytes — safe binary replacement
+          find extracted/ -type f | while read f; do
+            # Skip binary files (.so, ELF executables)
+            if file "$f" | grep -q 'ELF\|shared object'; then
+              # For binary files, use sed with binary mode
+              sed -i 's/com\.termux/com.nvterm/g' "$f" 2>/dev/null || true
+            else
+              # For text files, safe to use sed
+              sed -i 's/com\.termux/com.nvterm/g' "$f" 2>/dev/null || true
+              sed -i 's/termux-exec/nvterm-exec/g' "$f" 2>/dev/null || true
+              sed -i 's/termux_exec/nvterm_exec/g' "$f" 2>/dev/null || true
+              sed -i 's/TERMUX_EXEC/NOVATERM_EXEC/g' "$f" 2>/dev/null || true
+              sed -i 's/Termux/NovaTerm/g' "$f" 2>/dev/null || true
+            fi
+          done
+
+          # Update Package name in control file
+          sed -i 's/^Package: termux-exec$/Package: nvterm-exec/' extracted/DEBIAN/control
+          sed -i 's/termux-exec/nvterm-exec/g' extracted/DEBIAN/control
+
+          # Rename data files: termux-exec-* → nvterm-exec-*, libtermux-* → libnvterm-*
+          # In the data.tar
+          cd extracted/
+          # Find and rename termux-exec binaries
+          find . -name 'termux-exec-*' -exec sh -c 'mv "$1" "$(dirname "$1")/$(echo "$(basename "$1")" | sed s/termux-exec/nvterm-exec/)"' _ {} \; 2>/dev/null || true
+          find . -name 'libtermux-exec-*' -exec sh -c 'mv "$1" "$(dirname "$1")/$(echo "$(basename "$1")" | sed s/libtermux-exec/libnvterm-exec/)"' _ {} \; 2>/dev/null || true
+          find . -name 'libtermux-core*' -exec sh -c 'mv "$1" "$(dirname "$1")/$(echo "$(basename "$1")" | sed s/libtermux-core/libnvterm-core/)"' _ {} \; 2>/dev/null || true
+          cd ..
+
+          # Rebuild the .deb
+          NVD_VERSION="${{ steps.download.outputs.version }}"
+          dpkg-deb -b extracted/ "nvterm-exec_${NVD_VERSION}_aarch64.deb"
+
+          # Verify the package
+          echo "=== Package Info ==="
+          dpkg-deb -I "nvterm-exec_${NVD_VERSION}_aarch64.deb"
+
+          echo "=== Package Contents ==="
+          dpkg-deb -c "nvterm-exec_${NVD_VERSION}_aarch64.deb"
+
+          echo "version=$NVD_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Add to APT repository
+        run: |
+          VERSION="${{ steps.rebrand.outputs.version }}"
+          DEB_FILE="rebrand/nvterm-exec_${VERSION}_aarch64.deb"
+
+          if [ ! -f "$DEB_FILE" ]; then
+            echo "::error::Package file not found: $DEB_FILE"
+            exit 1
+          fi
+
+          # Copy to debs/ directory
+          mkdir -p debs
+          cp "$DEB_FILE" debs/
+
+          # Organize into pool structure
+          first_letter=$(echo "nvterm-exec" | cut -c1)
+          mkdir -p "pool/main/${first_letter}/nvterm-exec"
+          cp "$DEB_FILE" "pool/main/${first_letter}/nvterm-exec/"
+
+          echo "::notice::Added nvterm-exec ${VERSION} to repository"
+
+      - name: Regenerate repository metadata
+        run: |
+          # Determine input directory
+          if find pool -name "*.deb" | head -1 | grep -q .; then
+            INPUT_DIR="pool/"
+          elif ls debs/*.deb >/dev/null 2>&1; then
+            INPUT_DIR="debs/"
+          else
+            echo "::error::No .deb packages found"
+            exit 1
+          fi
+
+          # Import GPG key if available
+          SIGN_FLAG=""
+          if [ -n "$GPG_PRIVATE_KEY" ]; then
+            echo "$GPG_PRIVATE_KEY" | gpg --batch --import --no-tty 2>/dev/null
+            GPG_KEY_ID=$(gpg --list-keys --with-colons | grep '^fpr' | head -1 | cut -d: -f10)
+            SIGN_FLAG="--sign"
+          fi
+
+          # Generate metadata
+          python3 novaterm-apt-repo "$INPUT_DIR" output/ stable main $SIGN_FLAG || \
+          python3 novaterm-apt-repo "$INPUT_DIR" output/ stable main
+
+          # Copy pubkey
+          if [ -f "pubkey.gpg" ]; then
+            cp pubkey.gpg output/pubkey.gpg
+          fi
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+
+      - name: Commit and push changes
+        run: |
+          git config user.name "NovaTerm Bot"
+          git config user.email "bot@novaterm.org"
+
+          git add debs/ pool/ 2>/dev/null || true
+
+          if git diff --staged --quiet 2>/dev/null; then
+            echo "No changes to commit"
+          else
+            VERSION="${{ steps.rebrand.outputs.version }}"
+            git commit -m "feat: add nvterm-exec ${VERSION} (rebranded from termux-exec) [skip ci]"
+            git push
+          fi
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nvterm-exec-aarch64
+          path: |
+            debs/*.deb
+            pool/**/*.deb
+          retention-days: 90
