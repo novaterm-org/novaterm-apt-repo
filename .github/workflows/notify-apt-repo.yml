@@ -1,0 +1,44 @@
+name: Notify APT Repository
+
+# Notifies novaterm-apt-repo when packages are built successfully.
+# Uses repository_dispatch to trigger the import-packages workflow
+# for cross-repository communication.
+#
+# Required secret: PAT_NOVATERM_APT_REPO
+#   Personal access token with repo scope for novaterm-org/novaterm-apt-repo
+#   Create at: https://github.com/settings/tokens → Generate new token (classic)
+#   Scopes: repo (full control)
+#   Add to: novaterm-org/novaterm-packages → Settings → Secrets → Actions
+
+on:
+  workflow_run:
+    workflows: ["Publish APT Repository"]
+    types: [completed]
+
+jobs:
+  notify:
+    name: Notify APT repository
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger repository import
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.PAT_NOVATERM_APT_REPO }}
+          repository: novaterm-org/novaterm-apt-repo
+          event-type: new-packages
+          client-payload: |
+            {
+              "source": "novaterm-packages",
+              "run_id": "${{ github.event.workflow_run.id }}",
+              "sha": "${{ github.event.workflow_run.head_sha }}",
+              "ref": "${{ github.event.workflow_run.head_branch }}",
+              "timestamp": "${{ github.event.workflow_run.created_at }}"
+            }
+
+      - name: Log notification
+        run: |
+          echo "::notice::Notified novaterm-apt-repo of new packages"
+          echo "Run ID: ${{ github.event.workflow_run.id }}"
+          echo "SHA: ${{ github.event.workflow_run.head_sha }}"
+          echo "Ref: ${{ github.event.workflow_run.head_branch }}"

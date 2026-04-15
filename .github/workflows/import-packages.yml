@@ -1,0 +1,293 @@
+name: Import Packages
+
+# Professional APT repository update pipeline.
+# Pulls .deb packages from novaterm-packages CI builds,
+# validates them, organizes into pool structure, generates
+# signed metadata, and deploys to GitHub Pages.
+#
+# Architecture:
+#   novaterm-packages (build) → artifact (.deb files)
+#   novaterm-apt-repo (this workflow) → pool/ + dists/ + InRelease
+#
+# Triggers:
+#   - repository_dispatch: Triggered by novaterm-packages after successful builds
+#   - workflow_dispatch: Manual trigger with configurable options
+#   - schedule: Nightly regeneration at 03:30 UTC
+#   - push: Triggered when .deb files are added to debs/ directory
+
+on:
+  repository_dispatch:
+    types: [new-packages]
+  workflow_dispatch:
+    inputs:
+      regenerate_only:
+        description: 'Regenerate metadata only (skip downloading new packages)'
+        required: false
+        default: false
+        type: boolean
+      source_run_id:
+        description: 'Specific novaterm-packages workflow run ID to download from (empty = latest)'
+        required: false
+        type: string
+  schedule:
+    - cron: '30 3 * * *'
+  push:
+    branches: [main]
+    paths:
+      - 'debs/**'
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: apt-repo-update
+  cancel-in-progress: false
+
+env:
+  DISTRIBUTION: novaterm
+  COMPONENT: main
+  GPG_KEY_ID: ''
+
+jobs:
+  validate-and-import:
+    name: Import and validate packages
+    runs-on: ubuntu-latest
+    outputs:
+      packages_imported: ${{ steps.organize.outputs.count }}
+      has_signing_key: ${{ steps.gpg-import.outputs.has_key }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq dpkg-dev apt-utils python3 gnupg dirmngr
+
+      - name: Import GPG signing key
+        id: gpg-import
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          if [ -n "$GPG_PRIVATE_KEY" ]; then
+            echo "$GPG_PRIVATE_KEY" | gpg --batch --import --no-tty 2>/dev/null
+            GPG_KEY_ID=$(gpg --list-keys --with-colons --keyid-format long \
+              | grep '^fpr' | head -1 | cut -d: -f10)
+            echo "GPG_KEY_ID=$GPG_KEY_ID" >> "$GITHUB_ENV"
+            echo "has_key=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::GPG signing key imported: ${GPG_KEY_ID:0:16}..."
+            # Verify the key can sign
+            echo "test" | gpg --batch --yes --pinentry-mode loopback \
+              ${GPG_PASSPHRASE:+--passphrase "$GPG_PASSPHRASE"} \
+              -u "$GPG_KEY_ID" --clearsign -o /dev/null 2>/dev/null || {
+              echo "::error::GPG key imported but cannot sign. Check GPG_PASSPHRASE secret."
+              echo "has_key=false" >> "$GITHUB_OUTPUT"
+            }
+          else
+            echo "::warning::No GPG key configured. Repository will be unsigned."
+            echo "has_key=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download packages from novaterm-packages
+        if: inputs.regenerate_only != true
+        uses: dawidd6/action-download-artifact@v3
+        continue-on-error: true
+        with:
+          repo: novaterm-org/novaterm-packages
+          branch: main
+          workflow: packages.yml
+          name: packages-aarch64
+          path: downloaded-packages
+          if_no_artifact_found: warn
+          run_id: ${{ inputs.source_run_id || '' }}
+
+      - name: Validate downloaded packages
+        if: inputs.regenerate_only != true
+        run: |
+          valid_count=0
+          invalid_count=0
+
+          if [ -d "downloaded-packages" ]; then
+            for deb in downloaded-packages/**/*.deb downloaded-packages/*.deb; do
+              [ -f "$deb" ] || continue
+
+              # Validate .deb structure
+              if ! dpkg-deb -I "$deb" >/dev/null 2>&1; then
+                echo "::warning::Invalid .deb file: $(basename "$deb")"
+                invalid_count=$((invalid_count + 1))
+                rm -f "$deb"
+                continue
+              fi
+
+              # Verify it's for supported architecture
+              arch=$(dpkg-deb -f "$deb" Architecture 2>/dev/null)
+              if echo "$arch" | grep -qE '^(aarch64|arm64|all)$'; then
+                echo "::notice::Valid package: $(basename "$deb") [arch=$arch]"
+                valid_count=$((valid_count + 1))
+              else
+                echo "::warning::Unsupported architecture '$arch' in: $(basename "$deb")"
+                invalid_count=$((invalid_count + 1))
+                rm -f "$deb"
+              fi
+            done
+          fi
+
+          echo "Validated $valid_count packages, rejected $invalid_count"
+
+      - name: Organize packages into pool structure
+        id: organize
+        run: |
+          mkdir -p debs pool/main
+
+          # Copy downloaded packages
+          if [ -d "downloaded-packages" ]; then
+            find downloaded-packages -name "*.deb" -exec cp {} debs/ \;
+          fi
+
+          count=0
+          for deb in debs/*.deb; do
+            [ -f "$deb" ] || continue
+
+            # Extract package metadata
+            pkg_name=$(dpkg-deb -f "$deb" Package 2>/dev/null || basename "$deb" | sed 's/_.*//')
+            pkg_version=$(dpkg-deb -f "$deb" Version 2>/dev/null || echo "unknown")
+            pkg_arch=$(dpkg-deb -f "$deb" Architecture 2>/dev/null || echo "unknown")
+
+            # Pool structure: pool/main/{first-letter}/{package-name}/
+            first_letter=$(echo "$pkg_name" | cut -c1)
+            pkg_dir="pool/main/${first_letter}/${pkg_name}"
+            mkdir -p "$pkg_dir"
+
+            # Copy to pool, replacing any existing version
+            cp "$deb" "$pkg_dir/"
+            count=$((count + 1))
+            echo "::notice::Organized: ${pkg_name}_${pkg_version}_${pkg_arch} → $pkg_dir/"
+          done
+
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "Organized $count packages into pool structure"
+
+          # Clean up staging directory
+          rm -rf downloaded-packages
+
+      - name: Generate APT repository metadata
+        run: |
+          SIGN_FLAG=""
+          if [ -n "$GPG_KEY_ID" ]; then
+            SIGN_FLAG="--sign"
+          fi
+
+          # Determine input directory (prefer pool over debs)
+          INPUT_DIR="pool/"
+          if [ ! "$(find pool -name '*.deb' 2>/dev/null | head -1)" ]; then
+            if [ "$(ls debs/*.deb 2>/dev/null | head -1)" ]; then
+              INPUT_DIR="debs/"
+            else
+              echo "::warning::No .deb packages found. Creating empty repository structure."
+              mkdir -p "output/dists/${DISTRIBUTION}/${COMPONENT}/binary-aarch64"
+              mkdir -p "output/dists/${DISTRIBUTION}/${COMPONENT}/binary-all"
+              touch "output/dists/${DISTRIBUTION}/${COMPONENT}/binary-aarch64/Packages"
+              touch "output/dists/${DISTRIBUTION}/${COMPONENT}/binary-all/Packages"
+
+              # Create minimal Release file
+              cat > "output/dists/${DISTRIBUTION}/Release" <<EOF
+          Codename: ${DISTRIBUTION}
+          Version: 1
+          Architectures: aarch64 all
+          Components: ${COMPONENT}
+          Suite: ${DISTRIBUTION}
+          Description: NovaTerm APT repository
+          Date: $(date -u '+%a, %d %b %Y %H:%M:%S UTC')
+          EOF
+
+              # Export GPG key even for empty repo
+              if [ -n "$GPG_KEY_ID" ]; then
+                gpg --export --armor "$GPG_KEY_ID" > "output/pubkey.gpg"
+              else
+                echo "# NovaTerm APT Repository GPG Key" > "output/pubkey.gpg"
+                echo "# Use [trusted=yes] in sources.list for unsigned repos" >> "output/pubkey.gpg"
+              fi
+              exit 0
+            fi
+          fi
+
+          # Generate metadata using novaterm-apt-repo tool
+          echo "::group::Generating APT repository metadata"
+          python3 novaterm-apt-repo "$INPUT_DIR" output/ "$DISTRIBUTION" "$COMPONENT" $SIGN_FLAG || \
+          python3 novaterm-apt-repo "$INPUT_DIR" output/ "$DISTRIBUTION" "$COMPONENT"
+          echo "::endgroup::"
+
+          # Export GPG public key
+          if [ -n "$GPG_KEY_ID" ]; then
+            gpg --export --armor "$GPG_KEY_ID" > "output/pubkey.gpg"
+            echo "::notice::GPG public key exported to pubkey.gpg"
+          elif [ -f "pubkey.gpg" ]; then
+            cp pubkey.gpg output/pubkey.gpg
+          else
+            echo "# NovaTerm APT Repository GPG Key" > "output/pubkey.gpg"
+            echo "# Import with: curl -fsSL \$URL/pubkey.gpg | apt-key add -" >> "output/pubkey.gpg"
+            echo "# Or use [trusted=yes] in sources.list for unsigned repos" >> "output/pubkey.gpg"
+          fi
+
+      - name: Verify repository integrity
+        run: |
+          echo "=== Repository Structure ==="
+          find output/ -type f | sort | head -50
+
+          echo ""
+          echo "=== Package Count ==="
+          find output/ -name "*.deb" | wc -l
+
+          echo ""
+          echo "=== Architectures ==="
+          find output/ -type d -name "binary-*" | sed 's/.*binary-//' | sort -u
+
+          echo ""
+          echo "=== Release File ==="
+          find output/ -name "Release" -exec cat {} \; 2>/dev/null || echo "No Release file found"
+
+          echo ""
+          echo "=== Signing Status ==="
+          if [ -f "output/dists/${DISTRIBUTION}/InRelease" ]; then
+            echo "Repository is SIGNED (InRelease file exists)"
+            gpg --verify "output/dists/${DISTRIBUTION}/InRelease" 2>&1 || true
+          else
+            echo "Repository is UNSIGNED (no InRelease file)"
+          fi
+
+      - name: Commit repository changes
+        run: |
+          git config user.name "NovaTerm Bot"
+          git config user.email "bot@novaterm.org"
+
+          # Stage new and modified files
+          git add pool/ debs/ pubkey.gpg 2>/dev/null || true
+
+          # Check if there are changes to commit
+          if git diff --staged --quiet 2>/dev/null; then
+            echo "No changes to commit"
+          else
+            pkg_count=$(find pool -name "*.deb" | wc -l)
+            git commit -m "chore: update APT repository (${pkg_count} packages) [skip ci]"
+            git push
+          fi
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: output
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: validate-and-import
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
